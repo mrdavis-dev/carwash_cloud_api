@@ -52,10 +52,12 @@ class Car(BaseModel):
 class AssignmentCreate(BaseModel):
     car_plate: str
     employee_name: str
+    service_type: str = "Lavado Completo"  # Tipo de servicio aplicado
 
 class Assignment(AssignmentCreate):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     status: str = "Pending"
+    points_earned: int = 0  # Puntos ganados en este servicio
 
     class Config:
         json_encoders = {ObjectId: str}
@@ -137,6 +139,23 @@ async def get_car(plate: str, db: AsyncIOMotorDatabase = Depends(get_database)):
         raise HTTPException(status_code=404, detail=f"Auto con placa {plate_key} no encontrado.")
     return car
 
+@app.get("/cars/{plate}/history", response_model=List[Assignment], tags=["Cars"])
+async def get_car_history(plate: str, db: AsyncIOMotorDatabase = Depends(get_database)):
+    plate_key = plate.upper()
+    
+    # Verificar que el auto existe
+    car = await db.cars.find_one({"plate": plate_key})
+    if car is None:
+        raise HTTPException(status_code=404, detail=f"Auto con placa {plate_key} no encontrado.")
+    
+    # Obtener todas las asignaciones completadas para esta placa
+    history = await db.assignments.find({
+        "car_plate": plate_key,
+        "status": "Completed"
+    }).sort("_id", -1).to_list(1000)  # Ordenar por más reciente primero
+    
+    return [Assignment(**assignment) for assignment in history]
+
 # -----------------
 # Gestión de Asignaciones y Puntos
 # -----------------
@@ -151,7 +170,9 @@ async def create_assignment(assignment_data: AssignmentCreate, db: AsyncIOMotorD
     new_assignment = Assignment(
         car_plate=plate_key,
         employee_name=assignment_data.employee_name,
-        status="Washing"
+        service_type=assignment_data.service_type,
+        status="Washing",
+        points_earned=0
     )
     
     assignment_dict = new_assignment.model_dump(by_alias=True, exclude=["id"])
@@ -179,10 +200,13 @@ async def complete_assignment(assignment_id: str, db: AsyncIOMotorDatabase = Dep
     if assignment_to_update["status"] == "Completed":
         raise HTTPException(status_code=400, detail="Esta asignación ya está marcada como completada.")
 
-    # 1. Actualizar el estado de la asignación
+    # 1. Actualizar el estado de la asignación y registrar puntos ganados
     await db.assignments.update_one(
         {"_id": obj_id},
-        {"$set": {"status": "Completed"}}
+        {"$set": {
+            "status": "Completed",
+            "points_earned": POINTS_PER_WASH
+        }}
     )
 
     # 2. Acumular puntos (operación atómica)
