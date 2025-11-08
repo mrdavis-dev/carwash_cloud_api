@@ -77,6 +77,31 @@ class Assignment(AssignmentCreate):
         json_encoders = {ObjectId: str}
         arbitrary_types_allowed = True
 
+
+class EmployeeCreate(BaseModel):
+    name: str
+    role: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class EmployeeUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class Employee(BaseModel):
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    name: str
+    role: Optional[str] = None
+    phone: Optional[str] = None
+    business_id: str
+    created_at: Optional[str] = None
+
+    class Config:
+        json_encoders = {ObjectId: str}
+        arbitrary_types_allowed = True
+
 # --- AUTH / JWT setup ---
 SECRET_KEY = os.getenv("SECRET_KEY", "replace-this-with-a-secure-random-string")
 ALGORITHM = "HS256"
@@ -347,6 +372,104 @@ async def complete_assignment(assignment_id: str, db: AsyncIOMotorDatabase = Dep
         raise HTTPException(status_code=404, detail=f"Error: Auto con placa {car_plate} no encontrado para asignar puntos.")
     
     return update_result
+
+# -----------------
+# Gestión de Empleados
+# -----------------
+
+@app.get("/employees/", response_model=List[Employee], tags=["Employees"])
+async def get_all_employees(db: AsyncIOMotorDatabase = Depends(get_database), current_user: dict = Depends(get_current_user)):
+    """Obtener todos los empleados del negocio actual"""
+    business_id = current_user["business_id"]
+    employees = await db.employees.find({"business_id": business_id}).to_list(1000)
+    return employees
+
+
+@app.get("/employees/{employee_id}", response_model=Employee, tags=["Employees"])
+async def get_employee(employee_id: str, db: AsyncIOMotorDatabase = Depends(get_database), current_user: dict = Depends(get_current_user)):
+    """Obtener un empleado específico por ID"""
+    try:
+        obj_id = ObjectId(employee_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID de empleado inválido.")
+    
+    business_id = current_user["business_id"]
+    employee = await db.employees.find_one({"_id": obj_id, "business_id": business_id})
+    
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado.")
+    
+    return employee
+
+
+@app.post("/employees/", response_model=Employee, status_code=201, tags=["Employees"])
+async def create_employee(employee_data: EmployeeCreate, db: AsyncIOMotorDatabase = Depends(get_database), current_user: dict = Depends(get_current_user)):
+    """Crear un nuevo empleado"""
+    business_id = current_user["business_id"]
+    
+    employee_dict = employee_data.model_dump()
+    employee_dict["business_id"] = business_id
+    employee_dict["created_at"] = datetime.utcnow().isoformat()
+    
+    result = await db.employees.insert_one(employee_dict)
+    created_employee = await db.employees.find_one({"_id": result.inserted_id})
+    
+    return created_employee
+
+
+@app.put("/employees/{employee_id}", response_model=Employee, tags=["Employees"])
+async def update_employee(employee_id: str, employee_data: EmployeeUpdate, db: AsyncIOMotorDatabase = Depends(get_database), current_user: dict = Depends(get_current_user)):
+    """Actualizar un empleado existente"""
+    try:
+        obj_id = ObjectId(employee_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID de empleado inválido.")
+    
+    business_id = current_user["business_id"]
+    
+    # Verificar que el empleado existe y pertenece al negocio
+    existing_employee = await db.employees.find_one({"_id": obj_id, "business_id": business_id})
+    if existing_employee is None:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado.")
+    
+    # Construir el diccionario de actualización solo con los campos proporcionados
+    update_data = {k: v for k, v in employee_data.model_dump().items() if v is not None}
+    
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No se proporcionaron campos para actualizar.")
+    
+    # Actualizar el empleado
+    await db.employees.update_one(
+        {"_id": obj_id, "business_id": business_id},
+        {"$set": update_data}
+    )
+    
+    updated_employee = await db.employees.find_one({"_id": obj_id})
+    return updated_employee
+
+
+@app.delete("/employees/{employee_id}", status_code=200, tags=["Employees"])
+async def delete_employee(employee_id: str, db: AsyncIOMotorDatabase = Depends(get_database), current_user: dict = Depends(get_current_user)):
+    """Eliminar un empleado"""
+    try:
+        obj_id = ObjectId(employee_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="ID de empleado inválido.")
+    
+    business_id = current_user["business_id"]
+    
+    # Verificar que el empleado existe y pertenece al negocio
+    existing_employee = await db.employees.find_one({"_id": obj_id, "business_id": business_id})
+    if existing_employee is None:
+        raise HTTPException(status_code=404, detail="Empleado no encontrado.")
+    
+    # Eliminar el empleado
+    delete_result = await db.employees.delete_one({"_id": obj_id, "business_id": business_id})
+    
+    if delete_result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Error al eliminar el empleado.")
+    
+    return {"message": "Empleado eliminado exitosamente", "employee_id": employee_id}
 
 # --- Bloque de ejecución principal para Uvicorn ---
 if __name__ == "__main__":
